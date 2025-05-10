@@ -2,6 +2,7 @@ import { GoogleMap, Marker, Polyline, useJsApiLoader } from '@react-google-maps/
 import { JSX, useEffect, useState, useCallback } from 'react';
 import { parseGTFSShapes } from "../utils/gtfsParser";
 import { preprocessShapePoints} from "../utils/shapeSmoothing";
+import { RouteSelector } from "../components/RouteSelector";
 
 const interpolate = (
     start: google.maps.LatLngLiteral,
@@ -17,7 +18,8 @@ export default function MapView(): JSX.Element {
         googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
     });
 
-    const [routes, setRoutes] = useState<google.maps.LatLngLiteral[]>([]);
+    const [routes, setRoutes] = useState<Record<string, google.maps.LatLngLiteral[]>>({});
+    const [selectedRouteId, setSelectedRouteId] = useState<string>('');
     const [busPosition, setBusPosition] = useState<google.maps.LatLngLiteral>({ lat: 0, lng: 0 });
     const [currentSegment, setCurrentSegment] = useState(0);
     const [center, setCenter] = useState<google.maps.LatLngLiteral>({ lat: 0, lng: 0 });
@@ -43,10 +45,11 @@ export default function MapView(): JSX.Element {
     }
 
     const animateBus = useCallback(() => {
-        if (routes.length < 2) return;
+        if (!selectedRouteId || !routes[selectedRouteId] || routes[selectedRouteId].length < 2) return;
 
-        const start = routes[currentSegment];
-        const end = routes[(currentSegment + 1) % routes.length];
+        const currentRoute = routes[selectedRouteId];
+        const start = currentRoute[currentSegment];
+        const end = currentRoute[(currentSegment + 1) % currentRoute.length];
         const distance = calculateDistance(start, end);
         const ANIMATION_DURATION = distance / 0.01;
         let startTime: number;
@@ -61,69 +64,90 @@ export default function MapView(): JSX.Element {
             if (fraction < 1) {
                 requestAnimationFrame(animate);
             } else {
-                setCurrentSegment((prev) => (prev + 1) % (routes.length - 1));
+                setCurrentSegment((prev) => (prev + 1) % (currentRoute.length - 1));
             }
         };
 
         requestAnimationFrame(animate);
-    }, [routes, currentSegment]);
+    }, [routes, currentSegment, selectedRouteId]);
 
     useEffect(() => {
         fetch('/src/assets/shapes.txt')
             .then(response => response.text())
             .then(data => {
                 const shapes = parseGTFSShapes(data);
-                const firstShapeId = Object.keys(shapes)[0];
-                const points = shapes[firstShapeId].map(point => ({
-                    lat: point.lat,
-                    lng: point.lng
-                }));
-                const smoothedPoints = preprocessShapePoints(points);
-                setRoutes(smoothedPoints);
+                const processedRoutes: Record<string, google.maps.LatLngLiteral[]> = {};
 
-                // Calculate center point from shape points
-                if (smoothedPoints.length > 0) {
-                    setBusPosition(smoothedPoints[0]);
-                    const midPoint = Math.floor(smoothedPoints.length / 2);
-                    setCenter(smoothedPoints[midPoint]);
+                Object.entries(shapes).forEach(([shapeId, points]) => {
+                    const routePoints = points.map(point => ({
+                        lat: point.lat,
+                        lng: point.lng
+                    }));
+                    processedRoutes[shapeId] = preprocessShapePoints(routePoints);
+                })
+
+                setRoutes(processedRoutes);
+                const firstRouteId = Object.keys(processedRoutes)[0];
+                setSelectedRouteId(firstRouteId);
+
+                if (processedRoutes[firstRouteId]?.length > 0) {
+                    setBusPosition(processedRoutes[firstRouteId][0]);
+                    const midPoint = Math.floor(processedRoutes[firstRouteId].length / 2);
+                    setCenter(processedRoutes[firstRouteId][midPoint]);
                 }
             })
-            .catch(error => console.error('Error loading shapes:', error));
+            .catch(error => console.error('Error fetching shapes:', error));
     }, []);
 
     useEffect(() => {
-        if (routes.length > 0) {
+        if (selectedRouteId && routes[selectedRouteId]?.length > 0) {
             animateBus();
         }
-    }, [currentSegment, routes, animateBus]);
+    }, [currentSegment, routes, animateBus, selectedRouteId]);
+
+    const handleRouteChange = (routeId: string) => {
+        setSelectedRouteId(routeId);
+        setCurrentSegment(0);
+        if (routes[routeId]?.length > 0) {
+            setBusPosition(routes[routeId][0]);
+            const midPoint = Math.floor(routes[routeId].length / 2);
+            setCenter(routes[routeId][midPoint]);
+        }
+    }
 
     return isLoaded ? (
-        <div className="absolute inset-0 flex justify-center items-center bg-gray-100 h-screen w-screen">
+        <div className="absolute inset-0 flex flex-col justify-center items-center bg-gray-100 h-screen w-screen">
+            <RouteSelector
+                routes={routes}
+                selectedRouteId={selectedRouteId}
+                onRouteChange={handleRouteChange}
+            />
             <GoogleMap
                 mapContainerClassName="w-[60vw] h-[60vh] rounded-xl shadow-md"
                 center={center}
                 zoom={15}
             >
-                {routes.length > 0 && (
+                {selectedRouteId && routes[selectedRouteId] && (
                     <>
                         <Polyline
-                            path={routes}
+                            key={selectedRouteId}
+                            path={routes[selectedRouteId]}
                             options={{
                                 strokeColor: '#3b82f6',
                                 strokeOpacity: 0.7,
                                 strokeWeight: 5,
                                 geodesic: true,
-                                icons: [
-                                    {
-                                        icon: {
-                                            path: google.maps.SymbolPath.CIRCLE,
-                                            scale: 1,
-                                        },
-                                        repeat: '10px',
-                                    }]
+                                icons: [{
+                                    icon: {
+                                        path: google.maps.SymbolPath.CIRCLE,
+                                        scale: 1,
+                                    },
+                                    repeat: '10px',
+                                }]
                             }}
                         />
                         <Marker
+                            key={`bus-${selectedRouteId}`}
                             position={busPosition}
                             icon={{
                                 url: 'https://maps.google.com/mapfiles/ms/icons/bus.png'
@@ -135,3 +159,5 @@ export default function MapView(): JSX.Element {
         </div>
     ) : <p>Loading Map...</p>;
 }
+
+// Can you help me with optimizing the bus animation logic? The current implementation uses requestAnimationFrame, but it could be improved for smoother animations and better performance. Also, consider adding a loading state while the map is being fetched.</p>
