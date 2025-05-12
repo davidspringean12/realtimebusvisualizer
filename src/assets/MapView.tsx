@@ -1,14 +1,29 @@
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api';
 import { JSX, useEffect, useState, useCallback, useRef } from 'react';
 import { parseGTFSShapes } from "../utils/gtfsParser";
-import { preprocessShapePoints } from "../utils/shapeSmoothing";
+import {
+    calculateDistance,
+    calculateSpeedProfile,
+    preprocessShapePoints
+} from "../utils/shapeSmoothing";
+import { SpeedProfile } from "../types/movement";
 import { RouteSelector } from "../components/RouteSelector";
+
+const BASE_SPEED = 0.01; // Base speed for bus animation
+
+declare global {
+    interface Window {
+        google: typeof google;
+    }
+}
 
 // Simple type for map objects
 export default function MapView(): JSX.Element {
     const { isLoaded } = useJsApiLoader({
         googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
     });
+
+    console.log('Google Maps API Key:', import.meta.env.VITE_GOOGLE_MAPS_API_KEY);
 
     const [routes, setRoutes] = useState<Record<string, google.maps.LatLngLiteral[]>>({});
     const [selectedRouteId, setSelectedRouteId] = useState<string>('');
@@ -20,27 +35,6 @@ export default function MapView(): JSX.Element {
     const polylineRef = useRef<google.maps.Polyline | null>(null);
     const markerRef = useRef<google.maps.Marker | null>(null);
     const animationRef = useRef<number | null>(null);
-
-    // Function to calculate distance between two points
-    const calculateDistance = (
-        start: google.maps.LatLngLiteral,
-        end: google.maps.LatLngLiteral
-    ): number => {
-        const R = 6371e3;
-        const toRadians = (degrees: number) => degrees * Math.PI / 180;
-
-        const lat1 = toRadians(start.lat);
-        const lat2 = toRadians(end.lat);
-        const deltaLat = toRadians(end.lat - start.lat);
-        const deltaLng = toRadians(end.lng - start.lng);
-
-        const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
-            Math.cos(lat1) * Math.cos(lat2) *
-            Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
-
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c; // in meters
-    }
 
     // Function to interpolate between two points
     const interpolate = (
@@ -115,8 +109,16 @@ export default function MapView(): JSX.Element {
         const currentRoute = routes[selectedRouteId];
         const start = currentRoute[currentSegment];
         const end = currentRoute[(currentSegment + 1) % currentRoute.length];
+
+        const speedData: SpeedProfile = calculateSpeedProfile(
+            currentRoute,
+            currentSegment,
+            3
+        );
+
         const distance = calculateDistance(start, end);
-        const ANIMATION_DURATION = distance / 0.01;
+        const ANIMATION_DURATION = distance / (BASE_SPEED * speedData.currentSpeed);
+
         let startTime: number;
 
         const animate = (currentTime: number) => {
@@ -128,6 +130,22 @@ export default function MapView(): JSX.Element {
             // Update marker position
             if (markerRef.current) {
                 markerRef.current.setPosition(newPosition);
+
+                const heading = google.maps.geometry.spherical.computeHeading(
+                    new google.maps.LatLng(start.lat, start.lng),
+                    new google.maps.LatLng(end.lat, end.lng)
+                );
+
+                const scale = 4 + (speedData.currentSpeed * 2);
+                markerRef.current.setIcon({
+                    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                    scale: scale,
+                    rotation: heading,
+                    fillColor: speedData.currentSpeed < 0.5 ? '#f59e0b' : '#3b82f6',
+                    fillOpacity: 0.8,
+                    strokeWeight: 2,
+                    strokeColor: '#2563eb',
+                });
             }
 
             if (fraction < 1) {
@@ -241,10 +259,25 @@ export default function MapView(): JSX.Element {
                 zoom={15}
                 onLoad={onMapLoad}
                 options={{
-                    disableDefaultUI: false,
+                    disableDefaultUI: true,
                     zoomControl: true,
-                    streetViewControl: false,
-                    mapTypeControl: false
+                    zoomControlOptions: {
+                        position: window.google.maps.ControlPosition.RIGHT_CENTER
+                    },
+                    streetViewControl: true,
+                    streetViewControlOptions: {
+                        position: window.google.maps.ControlPosition.RIGHT_BOTTOM
+                    },
+                    mapTypeControl: true,
+                    mapTypeControlOptions: {
+                        position: window.google.maps.ControlPosition.TOP_RIGHT,
+                        style: window.google.maps.MapTypeControlStyle.DROPDOWN_MENU,
+                        mapTypeIds: [
+                            window.google.maps.MapTypeId.ROADMAP,
+                            window.google.maps.MapTypeId.SATELLITE,
+                            window.google.maps.MapTypeId.HYBRID
+                        ]
+                    }
                 }}
             >
                 {/* No children elements - we're creating map objects imperatively */}
